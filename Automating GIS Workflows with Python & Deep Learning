@@ -74,7 +74,7 @@ def format_time(seconds):
 start_total = time.time()
 
 # --- Step 2: Preprocessing Imagery ---
-log_message("\n🔧 Step 1: Preprocessing Imagery")
+log_message("\nStep 1: Preprocessing Imagery")
 supported_extensions = [".tif", ".tiff", ".img", ".jpg", ".jpeg", ".jp2", ".bmp", ".png"]
 raster_files = [f for f in os.listdir(input_dir) if os.path.splitext(f)[1].lower() in supported_extensions]
 
@@ -86,7 +86,7 @@ for file in raster_files:
         start = time.time()
         raster_obj = arcpy.Raster(file_path)
         if raster_obj.bandCount != 3:
-            log_message(f"⏩ Skipping {file} — not RGB")
+            log_message(f"Skipping {file} - not RGB")
             continue
         image_count += 1
         base = os.path.splitext(file)[0]
@@ -103,14 +103,14 @@ for file in raster_files:
         arcpy.management.Resample(input_for_resample, resampled_path, cell_size=resample_cell_size, resampling_type="BILINEAR")
         arcpy.management.DefineProjection(resampled_path, spatial_ref)
         elapsed = time.time() - start
-        log_message(f"✅ Preprocessed: {file} ({format_time(elapsed)})")
+        log_message(f"Preprocessed: {file} ({format_time(elapsed)})")
 
     except Exception as e:
-        log_message(f"❌ Failed {file}: {e}")
-log_message(f"🕒 Step 1 completed in {format_time(time.time() - step1_start)}")
+        log_message(f"Failed {file}: {e}")
+log_message(f"Step 1 completed in {format_time(time.time() - step1_start)}")
 
 # --- Step 3: Deep Learning Detection ---
-log_message("\n🧠 Step 2: Object Detection")
+log_message("\nStep 2: Object Detection")
 tif_files = [f for f in os.listdir(preprocessing_dir) if f.lower().endswith(".tif")]
 
 detection_start = time.time()
@@ -132,32 +132,32 @@ for tif_file in tif_files:
             use_pixelspace="NO_PIXELSPACE"
         )
         elapsed = time.time() - start
-        log_message(f"✅ Detected buildings in: {tif_file} ({format_time(elapsed)})")
+        log_message(f"Detected buildings in: {tif_file} ({format_time(elapsed)})")
     except Exception as e:
-        log_message(f"❌ Detection failed for {tif_file}: {e}")
-log_message(f"🕒 Step 2 completed in {format_time(time.time() - detection_start)}")
+        log_message(f"Detection failed for {tif_file}: {e}")
+log_message(f"Step 2 completed in {format_time(time.time() - detection_start)}")
 
 # --- Step 4: Merge Detected Shapefiles ---
-log_message("\n🧹 Step 3: Merging Detected Shapefiles")
+log_message("\nStep 3: Merging Detected Shapefiles")
 step3_start = time.time()
 combined_shapefile = os.path.join(detected_dir, f"Combined_Detected_Buildings_{today_str}.shp")
 shapefiles = [os.path.join(detected_dir, f) for f in os.listdir(detected_dir) if f.lower().endswith(".shp")]
 
 if len(shapefiles) == 0:
-    log_message("❌ No detected shapefiles found. Cannot continue.")
+    log_message("No detected shapefiles found. Cannot continue.")
     log_file.close()
     raise RuntimeError("No shapefiles available for merging.")
 elif len(shapefiles) == 1:
-    log_message("ℹ️ Only one shapefile found. Copying as combined shapefile.")
+    log_message("Only one shapefile found. Copying as combined shapefile.")
     base = os.path.splitext(shapefiles[0])[0]
     for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg", ".sbx", ".sbn", ".xml"]:
         src = base + ext
         dst = os.path.join(detected_dir, os.path.basename(src).replace(os.path.basename(base), f"Combined_Detected_Buildings_{today_str}"))
         if os.path.exists(src):
             shutil.copy(src, dst)
-    log_message(f"✅ Single shapefile copied as: {combined_shapefile}")
+    log_message(f"Single shapefile copied as: {combined_shapefile}")
 else:
-    log_message(f"🔎 Found {len(shapefiles)} shapefile(s) to merge...")
+    log_message(f"Found {len(shapefiles)} shapefile(s) to merge...")
     arcpy.management.Merge(shapefiles, combined_shapefile)
     for shp in shapefiles:
         base = os.path.splitext(shp)[0]
@@ -165,21 +165,21 @@ else:
             path = base + ext
             if os.path.exists(path):
                 shutil.move(path, os.path.join(pre_merged_dir, os.path.basename(path)))
-    log_message(f"✅ Merged into: {combined_shapefile}")
-log_message(f"🕒 Step 3 completed in {format_time(time.time() - step3_start)}")
+    log_message(f"Merged into: {combined_shapefile}")
+log_message(f"Step 3 completed in {format_time(time.time() - step3_start)}")
 
 # --- Step 5: Regularization ---
-log_message("\n🛌 Step 4: Regularizing Merged Buildings")
+log_message("\nStep 4: Regularizing Merged Buildings")
 step4_start = time.time()
 regularized_output = os.path.join(detected_dir, f"Regularized_Detected_Buildings_{today_str}.shp")
 
 if not arcpy.Exists(combined_shapefile):
-    log_message("❌ Combined shapefile not found. Aborting regularization.")
+    log_message("Combined shapefile not found. Aborting regularization.")
     log_file.close()
     raise FileNotFoundError(f"Combined shapefile does not exist: {combined_shapefile}")
 
 arcpy.management.RepairGeometry(combined_shapefile)
-log_message("✅ Geometry repaired.")
+log_message("Geometry repaired.")
 
 arcpy.ddd.RegularizeBuildingFootprint(
     in_features=combined_shapefile,
@@ -192,11 +192,11 @@ arcpy.ddd.RegularizeBuildingFootprint(
     max_radius=1000000,
     tolerance_type="DISTANCE"
 )
-log_message(f"✅ Regularized: {regularized_output}")
-log_message(f"🕒 Step 4 completed in {format_time(time.time() - step4_start)}")
+log_message(f"Regularized: {regularized_output}")
+log_message(f"Step 4 completed in {format_time(time.time() - step4_start)}")
 
 # --- Step 6A: Buffering ---
-log_message("\n🌀 Step 5: Buffering Regularized Buildings")
+log_message("\nStep 5: Buffering Regularized Buildings")
 step5_start = time.time()
 buffered_output = os.path.join(detected_dir, f"Buffered_Detected_Buildings_{today_str}.shp")
 
@@ -209,11 +209,11 @@ arcpy.analysis.Buffer(
     dissolve_option="NONE",
     method="PLANAR"
 )
-log_message(f"✅ Buffered: {buffered_output}")
-log_message(f"🕒 Step 5 completed in {format_time(time.time() - step5_start)}")
+log_message(f"Buffered: {buffered_output}")
+log_message(f"Step 5 completed in {format_time(time.time() - step5_start)}")
 
 # --- Step 6B: Final Regularization ---
-log_message("\n🌟 Step 6: Final Building Regularization")
+log_message("\nStep 6: Final Building Regularization")
 step6_start = time.time()
 final_output = os.path.join(final_output_dir, f"{filename_base}_{today_str}.shp")
 
@@ -228,8 +228,8 @@ arcpy.ddd.RegularizeBuildingFootprint(
     max_radius=1000000,
     tolerance_type="DISTANCE"
 )
-log_message(f"✅ Final buildings shapefile: {final_output}")
-log_message(f"🕒 Step 6 completed in {format_time(time.time() - step6_start)}")
+log_message(f"Final buildings shapefile: {final_output}")
+log_message(f"Step 6 completed in {format_time(time.time() - step6_start)}")
 
 # --- Wrap-up: Summary and Metrics ---
 final_feature_count = int(arcpy.management.GetCount(final_output)[0])
@@ -237,10 +237,10 @@ total_runtime_sec = time.time() - start_total
 total_runtime = format_time(total_runtime_sec)
 rate = round(final_feature_count / (total_runtime_sec / 60), 2) if total_runtime_sec > 0 else 0
 
-log_message("\n🎉 Workflow complete!")
-log_message(f"📸 Images processed: {image_count}")
-log_message(f"🏢 Total buildings in final output: {final_feature_count}")
-log_message(f"⏱️ Total runtime: {total_runtime}")
-log_message(f"📊 Rate: {rate} buildings generated per minute")
+log_message("\nWorkflow complete!")
+log_message(f"Images processed: {image_count}")
+log_message(f"Total buildings in final output: {final_feature_count}")
+log_message(f"Total runtime: {total_runtime}")
+log_message(f"Rate: {rate} buildings generated per minute")
 
 log_file.close()

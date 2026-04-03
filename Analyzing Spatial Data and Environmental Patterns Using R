@@ -1,0 +1,667 @@
+# 1. ---------- Project setup & directory definitions ---------- 
+
+# Set working directory (update path as needed)
+setwd("your/project/directory")
+cat("Working directory set to:", getwd(), "\n")
+
+# Define project folders
+raw_dir       <- file.path(getwd(), "Data_Raw")
+processed_dir <- file.path(getwd(), "Data_Processed")
+figures_dir   <- file.path(getwd(), "Outputs_Figures")
+tables_dir    <- file.path(getwd(), "Outputs_Tables")
+
+# Create directories if they do not already exist
+dirs_to_make <- c(raw_dir, processed_dir, figures_dir, tables_dir)
+for (d in dirs_to_make) {
+  if (!dir.exists(d)) {
+    dir.create(d, recursive = TRUE)
+    cat("Created missing directory:", d, "\n")
+  } else {
+    cat("Directory already exists:", d, "\n")
+  }
+}
+cat("Step 1 complete: All project directories ready.\n")
+
+
+
+# 2. ---------- Load Packages and Libraries ----------
+
+# Define all required packages
+required_packages <- c("sf", "raster", "tmap", "dplyr", "terra")
+
+# Install missing packages automatically
+missing <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
+if (length(missing) > 0) {
+  install.packages(missing, quiet = TRUE)
+}
+
+# Load all packages in one clean step
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+# Set tmap mode and confirm step completion
+tmap_mode("plot")
+cat("Step 2 complete: Packages loaded.\n")
+
+
+
+# 3. ---------- Define Input File Paths of Raw Data ----------
+
+# Updated input raster + vector paths
+landslide_path <- file.path(
+  processed_dir,
+  "Landslide_30m.tif"
+)
+county_path <- file.path(
+  raw_dir,
+  "WV_county_boundaries_24k_topo_updated_2022_utm83.shp"
+)
+cat("Step 3 complete: Input file paths defined.\n")
+
+
+
+# 4. ---------- Read landslide raster & county boundary ----------
+
+# Read the resampled landslide raster
+landslide_raw <- raster(landslide_path)
+
+cat("Landslide raster info:\n")
+print(landslide_raw)
+cat("Landslide raster CRS:\n")
+print(crs(landslide_raw))
+cat("Landslide raster resolution:\n")
+print(res(landslide_raw))
+cat("\n")
+
+# Read the county boundary shapefile
+county_sf <- st_read(county_path)
+cat("County boundary CRS:\n")
+print(st_crs(county_sf))
+cat("\n")
+cat("Step 4 complete: Raw landslide raster and county boundary loaded.\n")
+
+
+
+
+# 5. ---------- Ensure raster and county share the same CRS ----------
+
+crs_rast <- crs(landslide_raw)
+crs_vect <- st_crs(county_sf)
+if (crs_vect$proj4string != crs_rast@projargs) {
+  county_sf <- st_transform(county_sf, crs = crs_rast@projargs)
+  cat("County CRS transformed to match raster CRS.\n")
+} else {
+  cat("CRS already matched between raster and county.\n")
+}
+cat("Step 5 complete: CRS aligned between raster and county.\n")
+
+
+
+# 6. ---------- Global ESDA: Descriptive statistics & histogram ----------
+
+# Extract all raster values as a numeric vector
+ls_vals <- raster::values(landslide_raw)
+
+# Remove NA cells
+ls_vals <- ls_vals[!is.na(ls_vals)]
+
+# Basic descriptive statistics
+ls_mean <- mean(ls_vals)
+ls_median <- median(ls_vals)
+ls_min <- min(ls_vals)
+ls_max <- max(ls_vals)
+ls_sd <- sd(ls_vals)
+
+# Optionally, if susceptibility is discrete classes, get class frequencies
+ls_table <- table(ls_vals)
+ls_prop  <- prop.table(ls_table) * 100  # percent by class
+
+# Create a small stats data frame and write to CSV
+stats_df <- data.frame(
+  statistic = c("mean", "median", "min", "max", "sd"),
+  value     = c(ls_mean, ls_median, ls_min, ls_max, ls_sd)
+)
+stats_out_path <- file.path(tables_dir, "Landslide_GlobalStats.csv")
+write.csv(stats_df, stats_out_path, row.names = FALSE)
+
+# Also save class frequencies (if useful)
+class_out_path <- file.path(tables_dir, "Landslide_ClassFrequencies.csv")
+class_df <- data.frame(
+  class_value = as.numeric(names(ls_table)),
+  count       = as.vector(ls_table),
+  percent     = as.vector(ls_prop)
+)
+write.csv(class_df, class_out_path, row.names = FALSE)
+
+# Make and save a histogram of raster values (base R)
+hist_out_path <- file.path(figures_dir, "Landslide_Histogram.png")
+png(filename = hist_out_path, width = 1600, height = 1200, res = 200)
+
+# Build histogram object first (so we can extract counts)
+h <- hist(
+  ls_vals,
+  breaks = 50,
+  plot = FALSE
+)
+
+# Convert counts to millions for display
+million_labels <- h$counts / 1e6
+
+# Plot histogram manually with custom axes
+plot(
+  h,
+  main   = "Histogram of Landslide Susceptibility Values (30 m)",
+  xlab   = "Susceptibility value",
+  ylab   = "Frequency (millions)",
+  xaxt   = "standard",
+  yaxt   = "n",
+  col    = "gray80",
+  border = "gray40"
+)
+# Add custom Y axis in millions
+axis(
+  side = 2,
+  at   = pretty(h$counts),
+  labels = pretty(h$counts) / 1e6,
+  las = 1
+)
+dev.off()
+cat("Histogram updated: axis now displays frequency in millions.\n")
+
+
+
+# 7. ---------- Classified landslide susceptibility map (cut-based) ----------
+
+# Convert raster values into categorical classes using cut()
+landslide_class <- raster::calc(landslide_raw, fun = function(x) {
+  cut(
+    x,
+    breaks = c(0, 0.3, 0.7, 1.0),
+    include.lowest = TRUE,
+    labels = c(
+      "0.0–0.3 – Low susceptibility",
+      "0.3–0.7 – Moderate susceptibility",
+      "0.7–1.0 – High susceptibility"
+    )
+  )
+})
+
+# Convert to factor explicitly for tmap
+landslide_class <- as.factor(landslide_class)
+
+# Green → Yellow → Red color scheme
+sus_colors <- c("#2ECC71", "#F1C40F", "#E74C3C")  
+# (low, moderate, high)
+
+# Build tmap
+tm_landslide_class <-
+  tm_shape(landslide_class) +
+  tm_raster(
+    title   = "Landslide Susceptibility Class",
+    palette = sus_colors,
+    style   = "cat",
+    labels  = c(
+      "0.0–0.3 – Low susceptibility",
+      "0.3–0.7 – Moderate susceptibility",
+      "0.7–1.0 – High susceptibility"
+    )
+  ) +
+  tm_shape(st_geometry(county_sf)) +
+  tm_borders(col = "black", lwd = 0.6) +
+  # Add county boundaries to the legend WITHOUT a title
+  tm_add_legend(
+    type   = "line",
+    col    = "black",
+    lwd    = 0.6,
+    labels = "West Virginia counties"
+  ) +
+  tm_layout(
+    main.title     = "Classified Landslide Susceptibility (30 m)",
+    legend.outside = TRUE
+  )
+
+# Save map
+classified_map_path <- file.path(figures_dir, "Landslide_Classified_Map.png")
+tmap_save(
+  tm_landslide_class,
+  filename = classified_map_path,
+  dpi      = 300,
+  width    = 8,
+  height   = 6,
+  units    = "in"
+)
+cat("Step 7 complete: Classified susceptibility map saved.\n")
+
+
+
+# 8. ---------- Define high-risk threshold & create binary mask ----------
+
+# High-risk definition: 0.7–1.0 = high susceptibility
+high_risk_threshold <- 0.7
+
+# Create a binary raster:
+# 1 = high-risk pixel (>= 0.7)
+# 0 = not high-risk (< 0.7)
+landslide_highrisk <- raster::calc(landslide_raw, fun = function(x) {
+  out <- rep(NA_real_, length(x))
+  out[!is.na(x) & x >= high_risk_threshold] <- 1
+  out[!is.na(x) & x <  high_risk_threshold] <- 0
+  out
+})
+
+# Save high-risk mask raster
+highrisk_path <- file.path(processed_dir, "Landslide_HighRiskMask_30m.tif")
+writeRaster(landslide_highrisk, highrisk_path, overwrite = TRUE)
+
+# Overall WV high-risk summary
+hr_vals <- raster::values(landslide_highrisk)
+hr_vals <- hr_vals[!is.na(hr_vals)]
+total_cells <- length(hr_vals)
+high_cells  <- sum(hr_vals == 1)
+pct_high    <- high_cells / total_cells * 100
+
+# Cell area (m^2) and area in km^2 (30 m * 30 m = 900 m²)
+cell_area_m2      <- prod(res(landslide_highrisk))
+area_high_km2     <- high_cells  * cell_area_m2 / 1e6
+area_total_km2    <- total_cells * cell_area_m2 / 1e6
+
+# Save summary to CSV
+wv_hr_summary <- data.frame(
+  metric = c(
+    "total_cells",
+    "high_risk_cells",
+    "percent_high_risk",
+    "area_high_risk_km2",
+    "area_total_km2"
+  ),
+  value = c(
+    total_cells,
+    high_cells,
+    pct_high,
+    area_high_km2,
+    area_total_km2
+  )
+)
+hr_summary_path <- file.path(tables_dir, "WV_HighRiskSummary.csv")
+write.csv(wv_hr_summary, hr_summary_path, row.names = FALSE)
+cat("Step 8 complete: High-risk mask raster saved and WV summary written to:\n",
+    highrisk_path, "\n",
+    hr_summary_path, "\n")
+
+
+
+# 9. ---------- High-risk landslide mask map ----------
+
+# Convert binary 0/1 raster to factor
+landslide_highrisk_fac <- as.factor(landslide_highrisk)
+
+# Define color scheme: green = NOT high-risk, red = high-risk
+mask_colors <- c("0" = "#2ECC71",   # green
+                 "1" = "#E74C3C")  # red
+
+# Define labels matching categories
+mask_labels <- c(
+  "0 – Not high (susceptibility < 0.7)",
+  "1 – High (susceptibility ≥ 0.7)"
+)
+
+# Build tmap (matching Step 7 formatting)
+tm_highrisk <- 
+  tm_shape(landslide_highrisk_fac) +
+  tm_raster(
+    title   = "High-Risk Landslide Areas",
+    palette = mask_colors,
+    style   = "cat",
+    labels  = mask_labels
+  ) +
+  tm_shape(st_geometry(county_sf)) +
+  tm_borders(col = "black", lwd = 0.6) +
+  tm_add_legend(
+    type   = "line",
+    col    = "black",
+    lwd    = 0.6,
+    labels = "West Virginia counties"
+  ) +
+  tm_layout(
+    main.title     = "Areas of High-Risk from Landslides (≥ 0.7)",
+    legend.outside = TRUE
+  )
+
+# Save high-risk mask map
+highrisk_map_path <- file.path(figures_dir, "Landslide_HighRiskMask_Map.png")
+tmap_save(
+  tm_highrisk,
+  filename = highrisk_map_path,
+  dpi      = 300,
+  width    = 8,
+  height   = 6,
+  units    = "in"
+)
+cat("Step 9 complete: High-risk mask map saved to:\n",
+    highrisk_map_path, "\n")
+
+
+
+# 10. ---------- County-level landslide statistics ----------
+
+# Add an ID field to counties to keep everything aligned
+county_sf$ID <- 1:nrow(county_sf)
+
+# Use the existing county name field
+name_field <- "County_Nam"
+
+# A. Continuous susceptibility per county (30 m raster)
+sus_df <- raster::extract(
+  landslide_raw,   # 30 m raster
+  county_sf,
+  df = TRUE
+)
+
+# Rename the value column to a standard name ("value")
+# Column 1 is "ID", column 2 is the raster values
+colnames(sus_df)[2] <- "value"
+
+sus_summary <- sus_df |>
+  dplyr::group_by(ID) |>
+  dplyr::summarise(
+    mean_susc   = mean(value, na.rm = TRUE),
+    median_susc = stats::median(value, na.rm = TRUE),
+    sd_susc     = stats::sd(value, na.rm = TRUE),
+    n_cells     = sum(!is.na(value)),
+    .groups     = "drop"
+  )
+
+# B. High-risk (binary) per county
+hr_df <- raster::extract(
+  landslide_highrisk,
+  county_sf,
+  df = TRUE
+)
+
+# Again, standardize the value column name
+colnames(hr_df)[2] <- "value"
+hr_summary <- hr_df |>
+  dplyr::group_by(ID) |>
+  dplyr::summarise(
+    total_cells   = sum(!is.na(value)),
+    high_cells    = sum(value == 1, na.rm = TRUE),
+    pct_high_risk = ifelse(total_cells > 0,
+                           high_cells / total_cells * 100, NA_real_),
+    .groups       = "drop"
+  )
+
+# Cell area and high-risk area (km²)
+cell_area_m2   <- prod(res(landslide_highrisk))
+hr_summary$area_high_risk_km2 <- hr_summary$high_cells * cell_area_m2 / 1e6
+hr_summary$area_total_km2     <- hr_summary$total_cells * cell_area_m2 / 1e6
+
+# C. Combine summaries & add county names
+county_stats <- sus_summary |>
+  dplyr::left_join(hr_summary, by = "ID") |>
+  dplyr::mutate(
+    county_name = county_sf[[name_field]][ID]
+  ) |>
+  dplyr::select(
+    ID,
+    county_name,
+    mean_susc,
+    median_susc,
+    sd_susc,
+    n_cells,
+    total_cells,
+    high_cells,
+    pct_high_risk,
+    area_high_risk_km2,
+    area_total_km2
+  )
+
+# Add rank fields (higher rank = more high-risk)
+county_stats <- county_stats |>
+  dplyr::arrange(dplyr::desc(pct_high_risk)) |>
+  dplyr::mutate(
+    rank_pct_high  = dplyr::row_number(),
+    rank_mean_susc = dplyr::dense_rank(dplyr::desc(mean_susc))
+  )
+
+# D. Save table & join back to sf
+county_table_path <- file.path(tables_dir, "County_Landslide_Summary.csv")
+write.csv(county_stats, county_table_path, row.names = FALSE)
+county_sf_stats <- county_sf |>
+  dplyr::left_join(county_stats, by = "ID")
+cat("Step 10 complete: County-level statistics calculated and saved to:\n",
+    county_table_path, "\n")
+
+
+
+# 11. ---------- Choropleth: percent high-risk area by county ----------
+
+# Check that the key field exists
+if (!"pct_high_risk" %in% names(county_sf_stats)) {
+  stop("Step 11 error: 'pct_high_risk' not found in county_sf_stats. 
+       Make sure Step 10 completed successfully.")
+}
+
+# Build tmap: counties colored by % of high-risk cells (≥ 0.7)
+tm_county_highrisk <-
+  tm_shape(county_sf_stats) +
+  tm_fill(
+    col      = "pct_high_risk",
+    style    = "quantile",              # 5 quantile classes
+    n        = 5,
+    palette  = "YlOrRd",                # yellow → red (red = higher risk)
+    title    = "% high-risk cells\n(susceptibility ≥ 0.7)",
+    colorNA  = "grey90"
+  ) +
+  tm_borders(col = "black", lwd = 0.6) +
+  tm_layout(
+    main.title     = "Percent High-Risk Landslide Area by County",
+    legend.outside = TRUE
+  )
+
+# Save the county-level choropleth map
+county_map_path <- file.path(figures_dir, "County_Percent_HighRisk.png")
+tmap_save(
+  tm_county_highrisk,
+  filename = county_map_path,
+  dpi      = 300,
+  width    = 8,
+  height   = 6,
+  units    = "in"
+)
+cat("Step 11 complete: County-level percent high-risk map saved to:\n",
+    county_map_path, "\n")
+
+
+
+# 12. ---------- Choropleth: mean susceptibility per county ----------
+
+# Check that the key field exists
+if (!"mean_susc" %in% names(county_sf_stats)) {
+  stop("Step 12 error: 'mean_susc' not found in county_sf_stats. 
+       Make sure Step 10 completed successfully.")
+}
+
+# Build tmap: counties colored by mean susceptibility
+tm_county_meansusc <-
+  tm_shape(county_sf_stats) +
+  tm_fill(
+    col      = "mean_susc",
+    style    = "quantile",            # 5 quantile classes
+    n        = 5,
+    palette  = "GnBu",                # green/blue scale (low → high)
+    title    = "Mean Susceptibility\n(0 to 1)",
+    colorNA  = "grey90"
+  ) +
+  tm_borders(col = "black", lwd = 0.6) +
+  tm_layout(
+    main.title     = "Mean Landslide Susceptibility by County",
+    legend.outside = TRUE
+  )
+
+# Save map
+mean_susc_map_path <- file.path(figures_dir, "County_Mean_Susceptibility.png")
+tmap_save(
+  tm_county_meansusc,
+  filename = mean_susc_map_path,
+  dpi      = 300,
+  width    = 8,
+  height   = 6,
+  units    = "in"
+)
+cat("Step 12 complete: County-level mean susceptibility map saved to:\n",
+    mean_susc_map_path, "\n")
+
+
+
+# 13. ---------- Build spatial weights matrix (Queen contiguity) ----------
+
+# Install/load spdep for spatial autocorrelation analysis
+if (!"spdep" %in% installed.packages()[, "Package"]) {
+  install.packages("spdep", quiet = TRUE)
+}
+library(spdep)
+
+# Convert sf to Spatial for spdep
+county_sp <- as(county_sf_stats, "Spatial")
+
+# Create neighbors list (Queen contiguity)
+nb_queen <- poly2nb(county_sp, queen = TRUE)
+
+# Convert neighbors to row-standardized spatial weights
+lw_queen <- nb2listw(nb_queen, style = "W", zero.policy = TRUE)
+cat("Step 13 complete: Queen contiguity neighbors and weights matrix built.\n")
+
+
+
+# 14. ---------- Global Moran's I for percent high-risk ----------
+
+# Ensure variable exists
+if (!"pct_high_risk" %in% names(county_sf_stats)) {
+  stop("Step 14 error: 'pct_high_risk' not found in county_sf_stats. 
+       Make sure Step 10 completed successfully.")
+}
+moran_result <- moran.test(
+  county_sf_stats$pct_high_risk,
+  lw_queen,
+  zero.policy = TRUE
+)
+print(moran_result)
+
+# Save Moran's I summary to a text file
+moran_out_path <- file.path(tables_dir, "Global_MoransI_pctHighRisk.txt")
+sink(moran_out_path)
+print(moran_result)
+sink()
+cat("Step 14 complete: Global Moran's I calculated and saved to:\n",
+    moran_out_path, "\n")
+
+
+
+# 15. ---------- Local Moran's I (LISA) for percent high-risk ----------
+
+local_moran <- localmoran(
+  county_sf_stats$pct_high_risk,
+  lw_queen,
+  zero.policy = TRUE
+)
+
+# Attach LISA stats to county_sf_stats
+county_sf_stats$local_I      <- local_moran[, 1]  # Local Moran's I
+county_sf_stats$local_pvalue <- local_moran[, 5]  # p-value
+
+# Initialize cluster type
+county_sf_stats$cluster_type <- NA_character_
+
+# Use overall mean to distinguish "high" vs "low" % high-risk
+mean_val <- mean(county_sf_stats$pct_high_risk, na.rm = TRUE)
+high_val <- county_sf_stats$pct_high_risk > mean_val
+I_pos    <- county_sf_stats$local_I > 0
+
+# High–High (hot spot)
+county_sf_stats$cluster_type[
+  high_val & I_pos & county_sf_stats$local_pvalue < 0.05
+] <- "High–High (Hot Spot)"
+
+# Low–Low (cold spot)
+county_sf_stats$cluster_type[
+  (!high_val) & I_pos & county_sf_stats$local_pvalue < 0.05
+] <- "Low–Low (Cold Spot)"
+
+# High–Low outlier
+county_sf_stats$cluster_type[
+  high_val & (!I_pos) & county_sf_stats$local_pvalue < 0.05
+] <- "High–Low Outlier"
+
+# Low–High outlier
+county_sf_stats$cluster_type[
+  (!high_val) & (!I_pos) & county_sf_stats$local_pvalue < 0.05
+] <- "Low–High Outlier"
+
+# Non-significant
+county_sf_stats$cluster_type[
+  is.na(county_sf_stats$cluster_type)
+] <- "Not Significant"
+
+# Make it a factor with a nice ordering
+cluster_levels <- c(
+  "High–High (Hot Spot)",
+  "Low–Low (Cold Spot)",
+  "High–Low Outlier",
+  "Low–High Outlier",
+  "Not Significant"
+)
+county_sf_stats$cluster_type <- factor(
+  county_sf_stats$cluster_type,
+  levels = cluster_levels
+)
+
+# Save LISA results to CSV
+lisa_out_path <- file.path(tables_dir, "County_LISA_Results_pctHighRisk.csv")
+lisa_df <- st_drop_geometry(county_sf_stats)[, c(
+  "ID",
+  "county_name",
+  "pct_high_risk",
+  "local_I",
+  "local_pvalue",
+  "cluster_type"
+)]
+write.csv(lisa_df, lisa_out_path, row.names = FALSE)
+cat("Step 15 complete: Local Moran's I computed and LISA results saved to:\n",
+    lisa_out_path, "\n")
+
+
+
+# 16. ---------- Map Local Moran's I clusters (hot/cold spots) ----------
+
+cluster_colors <- c(
+  "High–High (Hot Spot)" = "#E31A1C",  # strong red
+  "Low–Low (Cold Spot)"  = "#1F78B4",  # strong blue
+  "High–Low Outlier"     = "#FB9A99",  # pale red
+  "Low–High Outlier"     = "#A6CEE3",  # pale blue
+  "Not Significant"      = "grey80"    # neutral grey
+)
+tm_lisa <-
+  tm_shape(county_sf_stats) +
+  tm_fill(
+    col     = "cluster_type",
+    palette = cluster_colors,
+    title   = "LISA Cluster Type"
+  ) +
+  tm_borders(col = "black", lwd = 0.6) +
+  tm_layout(
+    main.title     = "Local Moran's I Hotspot Analysis\n% High-Risk Landslide Area by County",
+    legend.outside = TRUE
+  )
+hotspot_map_path <- file.path(
+  figures_dir,
+  "County_LISA_Hotspot_Map_pctHighRisk.png"
+)
+tmap_save(
+  tm_lisa,
+  filename = hotspot_map_path,
+  dpi      = 300,
+  width    = 8,
+  height   = 6,
+  units    = "in"
+)
+cat("Step 16 complete: LISA hotspot map saved to:\n",
+    hotspot_map_path, "\n")
